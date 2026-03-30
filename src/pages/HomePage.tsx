@@ -1,10 +1,11 @@
-import { Link } from "react-router-dom";
+                                                                                                                                                import { useState } from "react";
+                                                                                                                                                import { Link } from "react-router-dom";
 import type { RoadReport } from "../types";
 
 interface HomePageProps {
   reportsCount: number;
   reports: RoadReport[];
-  onConfirmIssue: (reportId: string) => void;
+  onConfirmIssue: (reportId: string) => Promise<void> | void;
 }
 
 const statsBase = [
@@ -12,7 +13,49 @@ const statsBase = [
   { value: "112", label: "Active Maintenance Teams" }
 ];
 
+function getProgressPercent(status: RoadReport["status"]): number {
+  switch (status) {
+    case "New":
+      return 25;
+    case "In Review":
+      return 50;
+    case "Assigned":
+      return 75;
+    case "Resolved":
+      return 100;
+    default:
+      return 0;
+  }
+}
+
+function getProgressLabel(status: RoadReport["status"]): string {
+  switch (status) {
+    case "New":
+      return "Seen by Admin";
+    case "In Review":
+      return "Work Assigned";
+    case "Assigned":
+      return "Team Reached Location";
+    case "Resolved":
+      return "Completed with Evidence";
+    default:
+      return "Pending";
+  }
+}
+
+function getStageCompletion(status: RoadReport["status"]) {
+  const percent = getProgressPercent(status);
+  return [
+    { key: "seen", percent: 25, label: "Seen by Admin", done: percent >= 25 },
+    { key: "assigned", percent: 50, label: "Work Assigned", done: percent >= 50 },
+    { key: "onsite", percent: 75, label: "Team Reached Location", done: percent >= 75 },
+    { key: "done", percent: 100, label: "Completed + Photo Uploaded", done: percent >= 100 }
+  ];
+}
+
 export default function HomePage({ reportsCount, reports, onConfirmIssue }: HomePageProps) {
+  const [expandedProgressId, setExpandedProgressId] = useState<string | null>(null);
+
   const stats = [
     { value: `${reportsCount}+`, label: "Citizen Reports Logged" },
     ...statsBase
@@ -22,6 +65,15 @@ export default function HomePage({ reportsCount, reports, onConfirmIssue }: Home
     .filter((report) => report.status !== "Resolved")
     .sort((a, b) => b.upvotes - a.upvotes)
     .slice(0, 4);
+
+  const recentSolved = reports
+    .filter((report) => report.status === "Resolved")
+    .sort((a, b) => (b.resolvedAt ?? b.reportedAt).localeCompare(a.resolvedAt ?? a.reportedAt))
+    .slice(0, 4);
+
+  const transparencyQueue = reports
+    .sort((a, b) => b.reportedAt.localeCompare(a.reportedAt))
+    .slice(0, 5);
 
   const leaderboard = Object.values(
     reports.reduce<Record<string, { name: string; points: number; reports: number }>>((acc, report) => {
@@ -47,14 +99,26 @@ export default function HomePage({ reportsCount, reports, onConfirmIssue }: Home
           <p className="hero-subtitle">
             Fast, transparent complaint system that connects citizens with municipal authorities.
           </p>
+          <div className="hero-badges">
+            <span>Live Tracking</span>
+            <span>Geo-Verified Reports</span>
+            <span>Fast Assignment</span>
+          </div>
           <div className="hero-cta">
             <Link className="btn btn-primary btn-lg" to="/report">
               📍 Report an Issue
             </Link>
-            <Link className="btn btn-secondary btn-lg" to="/admin">
-              📊 View Dashboard
+            <Link className="btn btn-secondary btn-lg" to="/solved">
+              ✅ View Solved Issues
             </Link>
           </div>
+        </div>
+        <div className="hero-visual" aria-hidden="true">
+          <div className="hero-orb hero-orb-main" />
+          <div className="hero-orb hero-orb-alt" />
+          <div className="hero-float-card hero-float-card-a">Priority Routing</div>
+          <div className="hero-float-card hero-float-card-b">Realtime Status</div>
+          <div className="hero-float-card hero-float-card-c">Ward Analytics</div>
         </div>
       </section>
 
@@ -69,8 +133,8 @@ export default function HomePage({ reportsCount, reports, onConfirmIssue }: Home
           </div>
           <div className="step-box step-2">
             <div className="step-number">2</div>
-            <h3>AI Analysis</h3>
-            <p>Automatic damage detection, priority inference, and duplicate checking.</p>
+            <h3>Admin Verification</h3>
+            <p>Municipal team validates the report and sets priority transparently.</p>
           </div>
           <div className="step-box step-3">
             <div className="step-number">3</div>
@@ -218,10 +282,100 @@ export default function HomePage({ reportsCount, reports, onConfirmIssue }: Home
         </div>
       </section>
 
+      {/* PROGRESS TRANSPARENCY */}
+      <section className="section-container section-alt">
+        <h2 className="section-title">Live Report Progress</h2>
+        <div className="transparency-list">
+          {transparencyQueue.map((report) => (
+            <article key={report.id} className="transparency-item">
+              <div className="transparency-layout">
+                <img
+                  className="transparency-image"
+                  src={report.imageUrl}
+                  alt={`${report.issueType} complaint`}
+                  loading="lazy"
+                  onError={(event) => {
+                    event.currentTarget.src =
+                      "https://images.unsplash.com/photo-1593766788305-88f8f2184a82?auto=format&fit=crop&w=900&q=60";
+                  }}
+                />
+                <div className="transparency-content">
+                  <div className="transparency-head">
+                    <p>{report.id} - {report.issueType}</p>
+                    <strong>{getProgressPercent(report.status)}%</strong>
+                  </div>
+                  <p className="transparency-meta">{report.locality}</p>
+                  <p className="transparency-meta">{report.description}</p>
+                  <p className="transparency-meta">
+                    Priority: {report.priority} | Stage: {getProgressLabel(report.status)}
+                  </p>
+                  <div className="progress-bar">
+                    <span style={{ width: `${getProgressPercent(report.status)}%` }} />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-ghost progress-toggle"
+                    onClick={() =>
+                      setExpandedProgressId((prev) => (prev === report.id ? null : report.id))
+                    }
+                  >
+                    {expandedProgressId === report.id ? "Hide Tracking" : "View Tracking"}
+                  </button>
+                </div>
+              </div>
+
+              {expandedProgressId === report.id && (
+                <div className="stage-list" aria-label="Detailed report progress">
+                  {getStageCompletion(report.status).map((stage) => (
+                    <div key={`${report.id}-${stage.key}`} className="stage-item">
+                      <span
+                        className={stage.done ? "stage-dot stage-dot-done" : "stage-dot"}
+                        aria-hidden="true"
+                      />
+                      <p>{stage.label}</p>
+                      <strong>{stage.percent}%</strong>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </article>
+          ))}
+        </div>
+      </section>
+
+      {/* RECENTLY SOLVED */}
+      <section className="section-container">
+        <h2 className="section-title">Recently Solved Issues (Everyone)</h2>
+        <div className="recent-solved-grid">
+          {recentSolved.length === 0 && (
+            <article className="solution-card">
+              <h3>No solved cases yet</h3>
+              <p className="section-subtitle">Resolved issues with proof will appear here.</p>
+            </article>
+          )}
+
+          {recentSolved.map((report) => (
+            <article key={report.id} className="recent-solved-card">
+              <img
+                src={report.resolutionImageUrl ?? report.imageUrl}
+                alt={`${report.issueType} solved evidence`}
+                loading="lazy"
+              />
+              <div className="recent-solved-body">
+                <p className="issue-id">{report.id}</p>
+                <h3>{report.issueType}</h3>
+                <p className="issue-location">{report.locality}</p>
+                <p className="citizen-stats">Resolved on {report.resolvedAt ?? report.reportedAt}</p>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+
       {/* FOOTER MESSAGE */}
       <section className="section-container section-center">
         <p className="home-footer">
-          Built for faster road issue tracking, transparent status updates, and safer daily commutes.
+          
         </p>
       </section>
     </section>

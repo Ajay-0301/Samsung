@@ -33,7 +33,7 @@ interface ReportFormState {
 
 interface ReportPageProps {
   existingReports: RoadReport[];
-  onCreateReport: (report: RoadReport) => void;
+  onCreateReport: (report: RoadReport) => Promise<RoadReport | null> | RoadReport | null;
 }
 
 const initialState: ReportFormState = {
@@ -61,6 +61,31 @@ interface LocationSearchResult {
   lat: string;
   lon: string;
 }
+
+interface ReverseGeocodeResult {
+  display_name?: string;
+  address?: {
+    road?: string;
+    suburb?: string;
+    neighbourhood?: string;
+    city?: string;
+    town?: string;
+    village?: string;
+    state?: string;
+    postcode?: string;
+    amenity?: string;
+  };
+}
+
+interface SpeechRecognitionErrorEvent {
+  error?: string;
+}
+
+const defaultFallbackLocation = {
+  lat: 12.971599,
+  lng: 77.594566,
+  locality: "Central City Area"
+};
 
 function RecenterMap({ latitude, longitude }: Pick<MapPickerProps, "latitude" | "longitude">) {
   const map = useMap();
@@ -133,6 +158,12 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
   const [mapSearching, setMapSearching] = useState<boolean>(false);
   const [mapSearchError, setMapSearchError] = useState<string>("");
   const [mapResults, setMapResults] = useState<LocationSearchResult[]>([]);
+  const [toolNotice, setToolNotice] = useState<string>("");
+  const [lastVoiceTranscript, setLastVoiceTranscript] = useState<string>("");
+  const [locationResolving, setLocationResolving] = useState<boolean>(false);
+  const [resolvedAddress, setResolvedAddress] = useState<string>("");
+  const [submitError, setSubmitError] = useState<string>("");
+  const [submitting, setSubmitting] = useState<boolean>(false);
   const recognitionRef = useRef<any>(null);
   const navigate = useNavigate();
 
@@ -171,8 +202,8 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
 
   useEffect(() => {
     return () => {
-      if (previewUrl.startsWith("blob:")) {
-        URL.revokeObjectURL(previewUrl);
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
       }
     };
   }, [previewUrl]);
@@ -180,22 +211,110 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
   const handleImageChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
 
-    if (previewUrl.startsWith("blob:")) {
-      URL.revokeObjectURL(previewUrl);
-    }
-
     if (!file) {
       setPreviewUrl("");
       setImageName("");
       return;
     }
 
-    const nextUrl = URL.createObjectURL(file);
-    setPreviewUrl(nextUrl);
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        setPreviewUrl(reader.result);
+      }
+    };
+    reader.onerror = () => {
+      setPreviewUrl("");
+      setToolNotice("Could not read selected image. Please try another file.");
+    };
+    reader.readAsDataURL(file);
     setImageName(file.name);
   };
 
+  const appendVoiceTextFallback = () => {
+    const typed = window.prompt("Voice input is unavailable. Type your complaint text:", "");
+    if (!typed || !typed.trim()) {
+      setToolNotice("No voice fallback text entered.");
+      return;
+    }
+
+    const cleanText = typed.trim();
+    setLastVoiceTranscript(cleanText);
+    setFormData((prev) => ({
+      ...prev,
+      description: prev.description ? `${prev.description} ${cleanText}` : cleanText
+    }));
+    setToolNotice("Fallback text added to description.");
+  };
+
+  const resolveAddressFromCoordinates = async (lat: number, lng: number) => {
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`
+    );
+
+    if (!response.ok) {
+      throw new Error("Unable to resolve address.");
+    }
+
+    const data = (await response.json()) as ReverseGeocodeResult;
+    const address = data.address;
+
+    const localityParts = [
+      address?.road,
+      address?.suburb ?? address?.neighbourhood,
+      address?.city ?? address?.town ?? address?.village
+    ].filter(Boolean) as string[];
+
+    const landmark = address?.amenity ?? address?.postcode ?? "";
+
+    return {
+      locality: localityParts.join(", "),
+      landmark,
+      displayName: data.display_name ?? ""
+    };
+  };
+
+  const applyAddressFromCoordinates = async (lat: number, lng: number) => {
+    try {
+      setLocationResolving(true);
+      const resolved = await resolveAddressFromCoordinates(lat, lng);
+
+      setFormData((prev) => ({
+        ...prev,
+        locality: resolved.locality || prev.locality,
+        landmark: resolved.landmark || prev.landmark
+      }));
+
+      if (resolved.displayName) {
+        setMapQuery(resolved.displayName);
+        setResolvedAddress(resolved.displayName);
+      }
+
+      setToolNotice("Address auto-filled from your current location.");
+    } catch {
+      setToolNotice("Location pinned, but address lookup is unavailable. Please adjust fields manually.");
+    } finally {
+      setLocationResolving(false);
+    }
+  };
+
+  const applyFallbackLocation = () => {
+    handlePickLocation(defaultFallbackLocation.lat, defaultFallbackLocation.lng);
+    setMapQuery(defaultFallbackLocation.locality);
+    setResolvedAddress(defaultFallbackLocation.locality);
+    setFormData((prev) => ({
+      ...prev,
+      locality: prev.locality.trim() ? prev.locality : defaultFallbackLocation.locality
+    }));
+  };
+
   const handleStartVoice = () => {
+    if (voiceActive && recognitionRef.current) {
+      recognitionRef.current.stop();
+      setToolNotice("Voice capture stopped.");
+      return;
+    }
+
     const speechAPI = (window as Window & {
       webkitSpeechRecognition?: any;
       SpeechRecognition?: any;
@@ -204,10 +323,13 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
 
     if (!speechAPI) {
       setVoiceError("Voice input is not supported in this browser.");
+      setToolNotice("Voice input unavailable in this browser. Use manual typing.");
+      appendVoiceTextFallback();
       return;
     }
 
     setVoiceError("");
+    setToolNotice("Listening... speak your complaint clearly.");
     const recognition = new speechAPI();
     recognition.lang = "en-IN";
     recognition.interimResults = false;
@@ -215,13 +337,25 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
 
     recognition.onstart = () => setVoiceActive(true);
     recognition.onend = () => setVoiceActive(false);
-    recognition.onerror = () => {
+    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
       setVoiceActive(false);
-      setVoiceError("Voice capture failed. Please try again.");
+      const reason = event.error ?? "unknown";
+      const message =
+        reason === "not-allowed"
+          ? "Microphone permission denied. Allow mic access and try again."
+          : "Voice capture failed. Please try again.";
+      setVoiceError(message);
+      setToolNotice(message);
+
+      if (reason === "not-allowed" || reason === "audio-capture" || reason === "service-not-allowed") {
+        appendVoiceTextFallback();
+      }
     };
     recognition.onresult = (event: any) => {
       const transcript = event.results?.[0]?.[0]?.transcript ?? "";
       if (transcript) {
+        setLastVoiceTranscript(transcript);
+        setToolNotice("Voice text added to description.");
         setFormData((prev) => ({
           ...prev,
           description: prev.description ? `${prev.description} ${transcript}` : transcript
@@ -236,17 +370,25 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
   const handleOneTapFill = () => {
     setFormData((prev) => ({
       ...prev,
+      fullName: "Citizen Reporter",
+      email: "citizen@example.com",
       issueType: "Pothole",
-      description:
-        prev.description ||
-        "Large pothole causing traffic slowdown and safety risk near main road junction."
+      priority: "High",
+      locality: "Main Road, Ward 1",
+      landmark: "Near Bus Stop",
+      description: "Large pothole causing traffic slowdown and safety risk near main road junction."
     }));
+    setMapQuery("Main Road, Ward 1");
+
+    setToolNotice("Smart Fill completed. All key fields were auto-filled.");
     handleUseCurrentLocation();
   };
 
   const handlePickLocation = (lat: number, lng: number) => {
     setFormData((prev) => ({ ...prev, latitude: lat, longitude: lng }));
     setMapError("");
+    setMapSearchError("");
+    setToolNotice("Location pin updated on map.");
   };
 
   const handleMapSearch = async () => {
@@ -272,6 +414,8 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
       const data = (await response.json()) as LocationSearchResult[];
       if (data.length === 0) {
         setMapSearchError("No location found. Try a nearby landmark or area name.");
+      } else {
+        setToolNotice(`${data.length} matching location(s) found.`);
       }
       setMapResults(data);
     } catch {
@@ -285,22 +429,23 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
   const handlePickSearchResult = (result: LocationSearchResult) => {
     const lat = Number(result.lat);
     const lng = Number(result.lon);
-    handlePickLocation(lat, lng);
-    if (!formData.locality.trim()) {
-      setFormData((prev) => ({
-        ...prev,
-        latitude: lat,
-        longitude: lng,
-        locality: result.display_name.split(",").slice(0, 2).join(",").trim()
-      }));
-    }
+    const shortLocality = result.display_name.split(",").slice(0, 2).join(",").trim();
+    setFormData((prev) => ({
+      ...prev,
+      latitude: lat,
+      longitude: lng,
+      locality: prev.locality.trim() ? prev.locality : shortLocality
+    }));
+    setMapError("");
     setMapResults([]);
     setMapQuery(result.display_name);
+    setToolNotice("Selected location applied to map and coordinates.");
   };
 
   const handleUseCurrentLocation = () => {
     if (!navigator.geolocation) {
       setMapSearchError("Geolocation is not supported by your browser.");
+      setToolNotice("Geolocation not supported by your browser.");
       return;
     }
 
@@ -309,18 +454,23 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
         const lat = position.coords.latitude;
         const lng = position.coords.longitude;
         handlePickLocation(lat, lng);
+        void applyAddressFromCoordinates(lat, lng);
+        setToolNotice("Current location captured successfully.");
       },
       () => {
         setMapSearchError(
           "Unable to access your location. Please allow location access or use search."
         );
+        applyFallbackLocation();
+        setToolNotice("GPS unavailable. A default location was pinned; adjust it on map if needed.");
       },
       { enableHighAccuracy: true, timeout: 8000 }
     );
   };
 
-  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setSubmitError("");
 
     if (formData.latitude === null || formData.longitude === null) {
       setMapError("Please drop a pin on the map to set exact location coordinates.");
@@ -354,11 +504,17 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
         "https://images.unsplash.com/photo-1593766788305-88f8f2184a82?auto=format&fit=crop&w=900&q=60"
     };
 
-    onCreateReport(newReport);
+    setSubmitting(true);
+    const created = await onCreateReport(newReport);
+    setSubmitting(false);
+    if (!created) {
+      setSubmitError("Could not submit report to server. Please try again.");
+      return;
+    }
 
     navigate("/success", {
       state: {
-        id: reportId,
+        id: created.id,
         issueType: formData.issueType,
         locality: `${formData.locality} (${formData.latitude.toFixed(5)}, ${formData.longitude.toFixed(5)})`,
         recommendedAction: smartAction
@@ -375,15 +531,6 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
         <p className="report-hero-subtitle">
           Help your municipality maintain safer roads. Provide details, location, and evidence.
         </p>
-        <div className="quick-access-buttons">
-          <button type="button" className="btn btn-quick" onClick={handleOneTapFill}>
-            ⚡ One-Tap Smart Fill
-          </button>
-          <button type="button" className="btn btn-quick" onClick={handleStartVoice}>
-            🎤 {voiceActive ? "Listening..." : "Voice Input"}
-          </button>
-        </div>
-        {voiceError && <p className="form-warning">{voiceError}</p>}
       </section>
 
       <form className="report-form-organized" onSubmit={onSubmit}>
@@ -508,6 +655,12 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
                 <input
                   value={mapQuery}
                   onChange={(e) => setMapQuery(e.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void handleMapSearch();
+                    }
+                  }}
                   placeholder="Search area name, street, or landmark..."
                 />
                 <button
@@ -525,8 +678,9 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
                   type="button"
                   className="btn btn-location"
                   onClick={handleUseCurrentLocation}
+                  disabled={locationResolving}
                 >
-                  📍 Use My Location
+                  {locationResolving ? "Locating & filling address..." : "📍 Use My Location"}
                 </button>
                 <select
                   value={mapStyle}
@@ -540,6 +694,10 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
             </div>
 
             {mapSearchError && <p className="alert-error">{mapSearchError}</p>}
+
+            {resolvedAddress && (
+              <p className="address-chip">Detected Address: {resolvedAddress}</p>
+            )}
 
             {mapResults.length > 0 && (
               <div className="search-results">
@@ -637,33 +795,12 @@ export default function ReportPage({ existingReports, onCreateReport }: ReportPa
           )}
         </section>
 
-        {/* SECTION 5: AI ANALYSIS */}
-        <section className="form-section form-section-highlight">
-          <h2 className="form-section-title">🤖 AI Analysis & Smart Suggestion</h2>
-          <div className="ai-insights-panel">
-            <div className="ai-suggestion">
-              <p className="ai-label">Suggested Priority:</p>
-              <p className="ai-priority">{smartPriority}</p>
-              <p className="ai-action">{smartAction}</p>
-            </div>
-            <div className="ai-damages">
-              <p className="ai-label">Detected Issues:</p>
-              <div className="chip-row">
-                {aiInsights.map((insight) => (
-                  <span key={insight.label} className="chip chip-neutral">
-                    {insight.label} {(insight.confidence * 100).toFixed(0)}%
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
-        </section>
-
         {/* SUBMIT SECTION */}
         <section className="form-section form-section-submit">
-          <button type="submit" className="btn btn-submit">
-            ✓ Submit Report
+          <button type="submit" className="btn btn-submit" disabled={submitting}>
+            {submitting ? "Submitting..." : "✓ Submit Report"}
           </button>
+          {submitError && <p className="alert-error">{submitError}</p>}
           <p className="submit-info">
             Your report will be reviewed by local authorities and assigned to the nearest team with SLA tracking.
           </p>

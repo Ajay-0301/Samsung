@@ -1,0 +1,10 @@
+[
+  {
+    "role": "citizen",
+    "fullName": "abi",
+    "contact": "abi@gmail.com",
+    "passwordHash": "$pbkdf2-sha256$29000$wniP0ZozBoAwRsh5b62VEg$8gAYv43rcFV3ieDJh5knN6yPdJRjqLujGj1r19Xu2dQ",
+    "createdAt": "2026-03-25T07:31:54.512731+00:00",
+    "source": "fallback"
+  }
+]

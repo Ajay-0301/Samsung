@@ -31,4 +31,5 @@ export interface RoadReport {
   resolvedAt?: string;
   slaDueDate: string;
   imageUrl: string;
+  resolutionImageUrl?: string;
 }

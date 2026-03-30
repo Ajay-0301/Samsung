@@ -87,6 +87,8 @@ export const mockReports: RoadReport[] = [
     resolvedAt: "2026-03-20",
     slaDueDate: "2026-03-25",
     imageUrl:
-      "https://images.unsplash.com/photo-1503376780353-7e6692767b70?auto=format&fit=crop&w=900&q=60"
+      "https://images.unsplash.com/photo-1503376780353-7e6692767b70?auto=format&fit=crop&w=900&q=60",
+    resolutionImageUrl:
+      "https://images.unsplash.com/photo-1504215680853-026ed2a45def?auto=format&fit=crop&w=900&q=60"
   }
 ];
